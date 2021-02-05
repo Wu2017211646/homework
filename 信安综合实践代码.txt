@@ -1,0 +1,203 @@
+#define _CRT_SETCURE_NO_WARNINGS
+#include "stdafx.h"
+#include <stdlib.h>
+#include <string.h>
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib,"ws2_32.lib")
+
+#define SOURCE_PORT 9865
+#define MAX_RECEIVEBYTE 255
+
+//IP数据报首部
+typedef struct IpHeader
+{
+    unsigned char Version_HLen;//版本号 首部长度
+    unsigned char TOS;//服务类型
+    unsigned short Length;//总长度
+    unsigned short Ident; //标识
+    unsigned short Flags_Offset; //标志 片偏移
+    unsigned char TTL; //生存时间
+    unsigned char Protocol; //协议
+    unsigned short Checksum; //首部校验和
+    unsigned int SourceAddr; //源地址
+    unsigned int DestinationAddr; //目的地址
+} Ip_Header;
+
+//TCP的标志
+#define URG 0x20 
+#define ACK 0x10 
+#define PSH 0x08 
+#define RST 0x04 
+#define SYN 0x02 
+#define FIN 0x01
+
+//定义TCP首部
+typedef struct TcpHeader
+{
+    USHORT SrcPort;//16位源端口
+    USHORT DstPort; //16位目的端口
+    unsigned int SequenceNum; //32位序号
+    unsigned int Acknowledgment; //32为确认序号
+    unsigned char HdrLen; //首部长度
+    unsigned char Flags; //6位标志位
+    USHORT AdvertisedWindow; //16位窗口大小
+    USHORT Checksum; //16位校验和
+    USHORT UrgPtr; //16位紧急指针
+} Tcp_Header;
+
+//伪首部
+typedef struct PsdTcpHeader
+    {
+        unsigned long SourceAddr;
+        unsigned long DestinationAddr;
+        char Zero;
+        char Protcol;
+        unsigned short TcpLen;
+} PSD_Tcp_Header;
+
+
+//校验和函数
+USHORT checksum(USHORT *buffer, int size) 
+{ 
+unsigned long cksum=0; 
+while (size > 1) 
+{ 
+cksum += *buffer++; 
+size -= sizeof(USHORT); 
+} 
+if (size) 
+{ 
+cksum += *(UCHAR*)buffer; 
+} 
+cksum = (cksum >> 16) + (cksum & 0xffff); 
+cksum += (cksum >>16); 
+return (USHORT)(~cksum); 
+} 
+
+int main()
+{
+	//初始化WSAStartup
+	WSADATA w;
+	WSAStartup(0x0202,&w);
+	
+	//创建接收数据的原始套接字
+	SOCKET RecSocket = socket(AF_INET, SOCK_RAW, IPPROTO_IP);
+    if (RecSocket ==INVALID_SOCKET)
+    {
+        printf("socket failed with error %d\n", WSAGetLastError());
+        closesocket(RecSocket);
+        return 0;
+	}
+
+	//获取本机的IP地址信息，赋给sock变量
+    char Name[255];
+    int Result_name = gethostname(Name, 255);
+    if (Result_name == SOCKET_ERROR)
+    {
+        printf("gethostname failed with error %d\n", WSAGetLastError());
+        return 0;
+	}
+	//printf("Result_name: %d\n",Result_name);
+    struct hostent *pHostent;//记录主机的信息
+    pHostent = (struct hostent*)malloc(sizeof(struct hostent));
+    pHostent = gethostbyname(Name);
+    SOCKADDR_IN sock;//绑定的地址和端口号
+    sock.sin_family = AF_INET;//IP地址族
+    sock.sin_port = htons(5555);//16位端口号//将一个无符号短整型的主机数值转换为网络字节顺序
+	sock.sin_addr.S_un.S_addr = inet_addr("127.0.0.1");//32位IP地址
+    memcpy(&sock.sin_addr.S_un.S_addr, pHostent->h_addr_list[0], pHostent->h_length);//从源src所指的内存地址的起始位置开始拷贝n个字节到目标dest所指的内存地址的起始位置中
+    
+	//绑定套接字
+    int Result_bind = bind(RecSocket, (PSOCKADDR) &sock, sizeof(sock));
+    if (Result_bind == SOCKET_ERROR)
+    {
+        printf("bind failed with error %d\n", WSAGetLastError());
+        closesocket(RecSocket);
+        return 0;
+	} 
+	
+	//设置套接字
+    BOOL flag;
+	flag=true;
+	if (setsockopt(RecSocket, IPPROTO_IP, IP_HDRINCL, (char*) &flag, sizeof(flag)) == SOCKET_ERROR)
+	{
+		printf("setsockopt failed with error %d\n\n", WSAGetLastError());
+        return false;
+	}
+	//设置超时时间
+	int nTimeOver = 1000;
+    if (setsockopt(RecSocket, SOL_SOCKET, SO_SNDTIMEO, (char*)&nTimeOver, sizeof(nTimeOver)) == SOCKET_ERROR)
+    {
+        printf("setsockopt failed with error %d\n\n", WSAGetLastError());
+        return false;
+	}
+
+	// 利用原始套接字构造数据包
+	char szMsg[1000] ="2017211646";
+	
+	Ip_Header ip_header;
+	Tcp_Header tcp_header;
+	PSD_Tcp_Header psd_tcp_header;
+
+	//填充IP首部
+	ip_header.Version_HLen = (4<<4| sizeof(ip_header)/sizeof(unsigned long));
+	ip_header.TOS = 111;
+	ip_header.Length = htons(sizeof(ip_header)+sizeof(tcp_header));
+	ip_header.Ident = 1;
+	ip_header.Flags_Offset = 011;
+	ip_header.TTL = 110;
+	ip_header.Protocol = IPPROTO_TCP;
+	ip_header.Checksum = checksum((unsigned short *)&ip_header, 16);
+	ip_header.SourceAddr = inet_addr("127.0.0.1");
+	ip_header.DestinationAddr = inet_addr("127.0.0.1");
+
+	//填充TCP首部
+	tcp_header.DstPort = htons(5555);
+	tcp_header.SrcPort = htons(SOURCE_PORT);
+	tcp_header.SequenceNum = htonl(0x12345678);
+	tcp_header.Acknowledgment = 0;
+	tcp_header.HdrLen =(sizeof(tcp_header)/4<<4|0);
+	tcp_header.Flags = 16;
+	tcp_header.AdvertisedWindow = htons(10);//将一个无符号短整型的主机数值转换为网络字节顺序
+	tcp_header.UrgPtr = 0;
+	tcp_header.Checksum = checksum((unsigned short *)&tcp_header, 16);
+
+
+    //无连接的套接口，要从套接口上发送一个数据报，使用sendto()函数
+	int rect = sendto(RecSocket,szMsg,sizeof(ip_header)+sizeof(tcp_header),0,(PSOCKADDR)&sock,sizeof(sock) );
+	
+	if(rect == SOCKET_ERROR)
+	{
+        printf("send error %d\n\n", WSAGetLastError());
+        return false;
+	}
+	else
+	{
+		printf("data:%s\n ",szMsg);
+		printf("----------------------------IpHeader----------------------------\n\n");
+		printf("Version_HLen: %d\n\nTOS: %d\n\n",ip_header.Version_HLen,ip_header.TOS);
+		printf("Length: %d\n\nIdent: %d\n\n",ip_header.Length,ip_header.Ident);
+		printf("Flags_Offset: %d\n\nTTL: %d\n\n",ip_header.Flags_Offset,ip_header.TTL);
+		printf("Protocol: %d\n\nChecksum: %d\n\n",ip_header.Protocol,ip_header.Checksum);
+		printf("SourceAddr: %d\n\nDestinationAddr: %d\n\n",ip_header.SourceAddr,ip_header.SourceAddr);
+	    printf("----------------------------TcpHeader----------------------------\n\n");
+		printf("DstPort: %d\n\nSrcPort: %d\n\n",tcp_header.SrcPort,tcp_header.DstPort);
+		printf("SequenceNum: %d\n\nAcknowledgment:%d\n\n",tcp_header.SequenceNum,tcp_header.Acknowledgment);
+		printf("HdrLen %d\n\nFlags:%d\n\n",tcp_header.HdrLen,tcp_header.Flags);
+		printf("AdvertisedWindow:%d\n\nChecksum:%d\n\n",tcp_header.AdvertisedWindow,tcp_header.Checksum);
+		printf("UrgPtr:%d\n\n",tcp_header.UrgPtr);
+		
+
+	}
+
+	//关闭原始套接字
+	closesocket(RecSocket);
+	//WSACleanup释放
+	WSACleanup();
+
+	return 0;
+}
+
+
